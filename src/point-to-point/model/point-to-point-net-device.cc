@@ -576,7 +576,9 @@ PointToPointNetDevice::DoMpiReceive (Ptr<Packet> p)
 Address 
 PointToPointNetDevice::GetRemote (void) const
 {
-  NS_ASSERT (m_channel->GetNDevices () == 2);
+  if(!m_channel)
+    return Address (); // RDMA devices does not use m_channel
+  NS_ASSERT(m_channel->GetNDevices() == 2);
   for (uint32_t i = 0; i < m_channel->GetNDevices (); ++i)
     {
       Ptr<NetDevice> tmp = m_channel->GetDevice (i);

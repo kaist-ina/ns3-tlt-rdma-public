@@ -75,6 +75,7 @@ private:
   uint16_t m_sport, m_dport;
   uint32_t m_win; // bound of on-the-fly packets
   uint64_t m_baseRtt; // base Rtt
+  int32_t m_flow_id;
 };
 
 } // namespace ns3

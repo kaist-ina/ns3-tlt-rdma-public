@@ -28,6 +28,7 @@
 #include "ns3/socket-factory.h"
 #include "ns3/packet.h"
 #include "ns3/uinteger.h"
+#include "ns3/integer.h"
 #include "ns3/random-variable.h"
 #include "ns3/qbb-net-device.h"
 #include "ns3/ipv4-end-point.h"
@@ -87,6 +88,11 @@ RdmaClient::GetTypeId (void)
                    UintegerValue (0),
                    MakeUintegerAccessor (&RdmaClient::m_baseRtt),
                    MakeUintegerChecker<uint64_t> ())
+    .AddAttribute ("StatFlowID",
+                   "Flow ID",
+                   IntegerValue (-1),
+                   MakeIntegerAccessor (&RdmaClient::m_flow_id),
+                   MakeIntegerChecker<int32_t> ())
   ;
   return tid;
 }
@@ -134,7 +140,7 @@ void RdmaClient::StartApplication (void)
   // get RDMA driver and add up queue pair
   Ptr<Node> node = GetNode();
   Ptr<RdmaDriver> rdma = node->GetObject<RdmaDriver>();
-  rdma->AddQueuePair(m_size, m_pg, m_sip, m_dip, m_sport, m_dport, m_win, m_baseRtt);
+  rdma->AddQueuePair(m_size, m_pg, m_sip, m_dip, m_sport, m_dport, m_win, m_baseRtt, m_flow_id);
 }
 
 void RdmaClient::StopApplication ()

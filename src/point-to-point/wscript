@@ -21,6 +21,9 @@ def build(bld):
 		'model/rdma-hw.cc',
 		'model/switch-node.cc',
 		'model/switch-mmu.cc',
+		'model/flow-stat-tag.cc',
+		'model/tlt-tag.cc',
+		'helper/selective-packet-queue.cc',
         ]
 
     module_test = bld.create_ns3_module_test_library('point-to-point')
@@ -50,6 +53,9 @@ def build(bld):
 		'model/switch-node.h',
 		'model/switch-mmu.h',
 		'helper/sim-setting.h',
+		'model/flow-stat-tag.h',
+		'model/tlt-tag.h',
+		'helper/selective-packet-queue.h',
         ]
 
     if (bld.env['ENABLE_EXAMPLES']):

@@ -20,6 +20,7 @@
 #define BROADCOM_EGRESS_H
 
 #include <queue>
+#include <unordered_map>
 #include "ns3/packet.h"
 #include "queue.h"
 #include "drop-tail-queue.h"
@@ -45,6 +46,8 @@ namespace ns3 {
 
 		TracedCallback<Ptr<const Packet>, uint32_t> m_traceBeqEnqueue;
 		TracedCallback<Ptr<const Packet>, uint32_t> m_traceBeqDequeue;
+		
+		std::unordered_map<int32_t, Time> current_pause_time;
 
 	private:
 		bool DoEnqueue(Ptr<Packet> p, uint32_t qIndex);

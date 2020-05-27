@@ -24,10 +24,16 @@
 #include "ns3/simulator.h"
 #include "drop-tail-queue.h"
 #include "broadcom-egress-queue.h"
+#include "ns3/flow-id-num-tag.h"
+#include <unordered_map>
+
+#define MAP_KEY_EXISTS(map,key) (((map).find(key)!=(map).end())) 
 
 NS_LOG_COMPONENT_DEFINE("BEgressQueue");
 
 namespace ns3 {
+	
+	std::unordered_map<unsigned, Time> acc_pause_time; // global
 
 	NS_OBJECT_ENSURE_REGISTERED(BEgressQueue);
 
@@ -110,8 +116,19 @@ namespace ns3 {
 			{
 				for (qIndex = 1; qIndex <= qCnt; qIndex++)
 				{
-					if (!paused[(qIndex + m_rrlast) % qCnt] && m_queues[(qIndex + m_rrlast) % qCnt]->GetNPackets() > 0)  //round robin
-					{
+					bool cond1 = !paused[(qIndex + m_rrlast) % qCnt];
+					bool cond2 = m_queues[(qIndex + m_rrlast) % qCnt]->GetNPackets() > 0; //round robin
+
+					if (!cond1 && cond2) {
+						// Packet could be scheduled by RR, but could not be scheduled because of PAUSE
+						FlowIDNUMTag fit;
+						Ptr<Packet> p = ConstCast<Packet, const Packet>(m_queues[(qIndex + m_rrlast) % qCnt]->Peek());
+						if(p->PeekPacketTag(fit)) {
+							unsigned flowid = static_cast<unsigned>(fit.GetId());
+							if(!MAP_KEY_EXISTS(current_pause_time, flowid))
+								current_pause_time[flowid] = Simulator::Now();
+						}
+					} else if (cond1 && cond2) {
 						found = true;
 						break;
 					}
@@ -122,6 +139,23 @@ namespace ns3 {
 		if (found)
 		{
 			Ptr<Packet> p = m_queues[qIndex]->Dequeue();
+			
+			// Check if the flow has been blocked by PFC
+			if (p) {
+				FlowIDNUMTag fit;
+				if(p->PeekPacketTag(fit)) {
+					unsigned flowid = static_cast<unsigned>(fit.GetId());
+					if (MAP_KEY_EXISTS(current_pause_time, flowid))
+					{
+						Time tdiff = Simulator::Now() - current_pause_time[flowid];
+						if(!MAP_KEY_EXISTS(acc_pause_time, flowid))
+							acc_pause_time[flowid] = Seconds(0);
+						acc_pause_time[flowid] = acc_pause_time[flowid] + tdiff;
+						current_pause_time.erase(flowid);
+					}
+				}
+			}
+
 			m_traceBeqDequeue(p, qIndex);
 			m_bytesInQueueTotal -= p->GetSize();
 			m_bytesInQueue[qIndex] -= p->GetSize();

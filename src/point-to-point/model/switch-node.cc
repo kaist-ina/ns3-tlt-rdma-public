@@ -10,8 +10,10 @@
 #include "qbb-net-device.h"
 #include "ppp-header.h"
 #include "ns3/int-header.h"
+#include "tlt-tag.h"
 
 namespace ns3 {
+	struct stat_tx_ stat_tx;
 
 TypeId SwitchNode::GetTypeId (void)
 {
@@ -80,14 +82,34 @@ int SwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch){
 
 void SwitchNode::CheckAndSendPfc(uint32_t inDev, uint32_t qIndex){
 	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
-	if (m_mmu->CheckShouldPause(inDev, qIndex)){
-		device->SendPfc(qIndex, 0);
-		m_mmu->SetPause(inDev, qIndex);
+	bool pClasses[qCnt] = { 0 };
+	m_mmu->GetPauseClasses(inDev, qIndex, pClasses);
+	for (int j = 0; j < qCnt; j++)
+	{
+		if(pClasses[j]) {
+			uint32_t paused_time = device->SendPfc(j, 0);
+			m_mmu->SetPause(inDev, j, paused_time);
+			m_mmu->m_pause_remote[inDev][j] = true;
+			if(device->IsQbbEnabled())
+				stat_tx.PauseSendCnt++;
+		}
+	}
+
+	for (int j = 0; j < qCnt; j++)
+	{
+		if(!m_mmu->m_pause_remote[inDev][j])
+			continue;
+
+		if (m_mmu->GetResumeClasses(inDev, j)){
+			device->SendPfc(j, 1);
+			m_mmu->SetResume(inDev, j);
+			m_mmu->m_pause_remote[inDev][j] = false;
+		}
 	}
 }
 void SwitchNode::CheckAndSendResume(uint32_t inDev, uint32_t qIndex){
 	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
-	if (m_mmu->CheckShouldResume(inDev, qIndex)){
+	if (m_mmu->GetResumeClasses(inDev, qIndex)){
 		device->SendPfc(qIndex, 1);
 		m_mmu->SetResume(inDev, qIndex);
 	}
@@ -106,15 +128,50 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch){
 			qIndex = (ch.l3Prot == 0x06 ? 1 : ch.udp.pg); // if TCP, put to queue 1
 		}
 
+		bool tlt_drop = false;
+
+		// TLT
+		TltTag tlt;
+		if (m_mmu->m_tlt) {
+			if (p->PeekPacketTag(tlt)) {
+				if (tlt.GetType() == TltTag::PACKET_NOT_IMPORTANT) {
+					if (!m_mmu->CheckEgressTLT(idx, qIndex, p->GetSize())) {
+						tlt_drop = true;
+						stat_tx.txTltDropBytes += p->GetSize();
+					}
+				}
+			}
+		}
+
 		// admission control
 		FlowIdTag t;
 		p->PeekPacketTag(t);
 		uint32_t inDev = t.GetFlowId();
 		if (qIndex != 0){ //not highest priority
-			if (m_mmu->CheckIngressAdmission(inDev, qIndex, p->GetSize()) && m_mmu->CheckEgressAdmission(idx, qIndex, p->GetSize())){			// Admission control
+			if (!tlt_drop && m_mmu->CheckIngressAdmission(inDev, qIndex, p->GetSize()) && m_mmu->CheckEgressAdmission(idx, qIndex, p->GetSize())){			// Admission control
 				m_mmu->UpdateIngressAdmission(inDev, qIndex, p->GetSize());
 				m_mmu->UpdateEgressAdmission(idx, qIndex, p->GetSize());
-			}else{
+				if (m_mmu->m_tlt) {
+					if (tlt.GetType() == TltTag::PACKET_NOT_IMPORTANT) {
+						m_mmu->UpdateIngressTLT(inDev, qIndex, p->GetSize());
+						m_mmu->UpdateEgressTLT(idx, qIndex, p->GetSize());
+						stat_tx.txUimpBytes += p->GetSize();
+					} else if (tlt.GetType() == TltTag::PACKET_IMPORTANT || tlt.GetType() == TltTag::PACKET_IMPORTANT_FORCE) {
+						stat_tx.txImpBytes += p->GetSize();
+					} else if (tlt.GetType() == TltTag::PACKET_IMPORTANT_ECHO || tlt.GetType() == TltTag::PACKET_IMPORTANT_ECHO_FORCE) {
+						stat_tx.txImpEBytes += p->GetSize();
+					} else {
+						stat_tx.txUimpBytes += p->GetSize();
+					}
+				}
+			} else if (!tlt_drop) {
+				if(m_mmu->m_tlt && tlt.GetType() != TltTag::PACKET_NOT_IMPORTANT) {
+					stat_tx.importantDropBytes += p->GetSize();
+					stat_tx.importantDropCnt += 1;
+					std::cerr << "Warning: Important Packet has been dropped" << std::endl;
+				}
+				return;
+			} else {
 				return; // Drop
 			}
 			CheckAndSendPfc(inDev, qIndex);
@@ -189,6 +246,13 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 		uint32_t inDev = t.GetFlowId();
 		m_mmu->RemoveFromIngressAdmission(inDev, qIndex, p->GetSize());
 		m_mmu->RemoveFromEgressAdmission(ifIndex, qIndex, p->GetSize());
+		{
+			TltTag tlt;
+			if (m_mmu->m_tlt && p->PeekPacketTag(tlt) && tlt.GetType() == TltTag::PACKET_NOT_IMPORTANT) {
+				m_mmu->RemoveFromIngressTLT(inDev, qIndex, p->GetSize());
+				m_mmu->RemoveFromEgressTLT(ifIndex, qIndex, p->GetSize());
+			}
+		}
 		m_bytes[inDev][ifIndex][qIndex] -= p->GetSize();
 		if (m_ecnEnabled){
 			bool egressCongested = m_mmu->ShouldSendCN(ifIndex, qIndex);

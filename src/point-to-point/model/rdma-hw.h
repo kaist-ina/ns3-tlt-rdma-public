@@ -2,9 +2,10 @@
 #define RDMA_HW_H
 
 #include <ns3/rdma.h>
-#include <ns3/rdma-queue-pair.h>
+#include "rdma-queue-pair.h"
 #include <ns3/node.h>
 #include <ns3/custom-header.h>
+#include <ns3/selective-packet-queue.h>
 #include "qbb-net-device.h"
 #include <unordered_map>
 
@@ -23,7 +24,7 @@ struct RdmaInterfaceMgr{
 class RdmaHw : public Object {
 public:
 
-	static TypeId GetTypeId (void);
+	static TypeId GetTypeId(void);
 	RdmaHw();
 
 	Ptr<Node> m_node;
@@ -50,8 +51,11 @@ public:
 	static uint64_t GetQpKey(uint16_t sport, uint16_t pg); // get the lookup key for m_qpMap
 	Ptr<RdmaQueuePair> GetQp(uint16_t sport, uint16_t pg); // get the qp
 	uint32_t GetNicIdxOfQp(Ptr<RdmaQueuePair> qp); // get the NIC index of the qp
-	void AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt); // add a new qp (new send)
-
+	void AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, int32_t flow_id); // add a nw qp (new send)
+	void AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt) {
+		this->AddQueuePair(size, pg, _sip, _dip, _sport, _dport, win, baseRtt, -1);
+	} 
+	
 	Ptr<RdmaRxQueuePair> GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create); // get a rxQp
 	uint32_t GetNicIdxOfRxQp(Ptr<RdmaRxQueuePair> q); // get the NIC index of the rxQp
 
@@ -78,6 +82,9 @@ public:
 	void PktSent(Ptr<RdmaQueuePair> qp, Ptr<Packet> pkt, Time interframeGap);
 	void UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t pkt_size);
 	void ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate);
+
+	void HandleTimeout(Ptr<RdmaQueuePair> qp, Time rto);
+	void PrintStat(void);
 	/******************************
 	 * Mellanox's version of DCQCN
 	 *****************************/
@@ -112,6 +119,11 @@ public:
 	void ActiveIncreaseMlx(Ptr<RdmaQueuePair> q);
 	void HyperIncreaseMlx(Ptr<RdmaQueuePair> q);
 
+	// Implement Timeout according to IB Spec Vol. 1 C9-139.
+	// For an HCA requester using Reliable Connection service, to detect missing responses,
+	// every Send queue is required to implement a Transport Timer to time outstanding requests.
+	Time m_waitAckTimeout;
+
 	/***********************
 	 * High Precision CC
 	 ***********************/
@@ -139,6 +151,40 @@ public:
 	 *********************/
 	DataRate m_dctcp_rai;
 	void HandleAckDctcp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch);
+
+	
+	/**********************
+	 * IRN
+	 *********************/
+	bool m_irn;
+	Time m_irn_rtoLow;
+	Time m_irn_rtoHigh;
+	uint32_t m_irn_bdp;
+
+	
+	/**********************
+	 * TLT
+	 *********************/
+	bool m_tlt;
+	uint32_t m_tlt_important_marking_interval;
+	inline TltCcType GetCcType() const {
+		if (m_cc_mode == CC_MODE_DCQCN && !m_irn)
+			return CC_TYPE_RATE;
+		if (m_cc_mode == CC_MODE_DCQCN && m_irn)
+			return CC_TYPE_STATIC_WINDOW;
+		if (m_cc_mode == CC_MODE_HPCC)
+			return CC_TYPE_DYNAMIC_WINDOW;
+		if (m_cc_mode == CC_MODE_TIMELY)
+			return CC_TYPE_RATE;
+		NS_ABORT_MSG("CC Type not supported by TLT");
+		return CC_TYPE_RATE; // cannot reach here
+	}
+	inline bool IsWindowBasedCC() const {
+		TltCcType c = GetCcType();
+		return c == CC_TYPE_STATIC_WINDOW || c == CC_TYPE_DYNAMIC_WINDOW;
+	}
+	bool forceSendTLT(Ptr<RdmaQueuePair> qp, int *psize);
+	void GenerateTltFin(Ptr<RdmaQueuePair> qp);
 };
 
 } /* namespace ns3 */

@@ -60,6 +60,7 @@ def build(bld):
         'utils/leaky-bucket.cc',
 		'utils/custom-header.cc',
 		'utils/int-header.cc',
+		'model/flow-id-num-tag.cc',
         ]
 
     network_test = bld.create_ns3_module_test_library('network')
@@ -82,6 +83,7 @@ def build(bld):
         'model/application.h',
         'model/buffer.h',
         'model/byte-tag-list.h',
+        'model/broadcom-node.h',
         'model/channel.h',
         'model/channel-list.h',
         'model/chunk.h',
@@ -139,6 +141,7 @@ def build(bld):
         'utils/leaky-bucket.h',
 		'utils/custom-header.h',
 		'utils/int-header.h',
+		'model/flow-id-num-tag.h',
         ]
 
     if (bld.env['ENABLE_EXAMPLES']):

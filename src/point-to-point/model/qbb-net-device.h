@@ -32,6 +32,7 @@
 #include "ns3/rdma-queue-pair.h"
 #include <vector>
 #include<map>
+#include <unordered_map>
 #include <ns3/rdma.h>
 
 namespace ns3 {
@@ -45,6 +46,7 @@ public:
 	uint32_t m_rrlast;
 	Ptr<DropTailQueue> m_ackQ; // highest priority queue
 	Ptr<RdmaQueuePairGroup> m_qpGrp; // queue pairs
+	std::unordered_map<int32_t, Time> current_pause_time;
 
 	// callback for get next packet
 	typedef Callback<Ptr<Packet>, Ptr<RdmaQueuePair> > RdmaGetNxtPkt;
@@ -130,60 +132,63 @@ public:
    void ReassignedQp(Ptr<RdmaQueuePair> qp);
    void TriggerTransmit(void);
 
-	void SendPfc(uint32_t qIndex, uint32_t type); // type: 0 = pause, 1 = resume
+   bool IsQbbEnabled(void) { return m_qbbEnabled; }
 
-	TracedCallback<Ptr<const Packet>, uint32_t> m_traceEnqueue;
-	TracedCallback<Ptr<const Packet>, uint32_t> m_traceDequeue;
-	TracedCallback<Ptr<const Packet>, uint32_t> m_traceDrop;
-	TracedCallback<uint32_t> m_tracePfc; // 0: resume, 1: pause
-protected:
+   uint32_t SendPfc(uint32_t qIndex, uint32_t type); // type: 0 = pause, 1 = resume
 
-	//Ptr<Node> m_node;
+   TracedCallback<Ptr<const Packet>, uint32_t> m_traceEnqueue;
+   TracedCallback<Ptr<const Packet>, uint32_t> m_traceDequeue;
+   TracedCallback<Ptr<const Packet>, uint32_t> m_traceDrop;
+   TracedCallback<uint32_t> m_tracePfc; // 0: resume, 1: pause
+ protected:
 
-  bool TransmitStart (Ptr<Packet> p);
-  
-  virtual void DoDispose(void);
+   //Ptr<Node> m_node;
 
-  /// Reset the channel into READY state and try transmit again
-  virtual void TransmitComplete(void);
+   bool TransmitStart (Ptr<Packet> p);
 
-  /// Look for an available packet and send it using TransmitStart(p)
-  virtual void DequeueAndTransmit(void);
+   virtual void DoDispose(void);
 
-  /// Resume a paused queue and call DequeueAndTransmit()
-  virtual void Resume(unsigned qIndex);
+   /// Reset the channel into READY state and try transmit again
+   virtual void TransmitComplete(void);
 
-  /**
+   /// Look for an available packet and send it using TransmitStart(p)
+   virtual void DequeueAndTransmit(void);
+
+   /// Resume a paused queue and call DequeueAndTransmit()
+   virtual void Resume(unsigned qIndex);
+
+   /**
    * The queues for each priority class.
    * @see class Queue
    * @see class InfiniteQueue
    */
-  Ptr<BEgressQueue> m_queue;
+   Ptr<BEgressQueue> m_queue;
 
-  Ptr<QbbChannel> m_channel;
-  
-  //pfc
-  bool m_qbbEnabled;	//< PFC behaviour enabled
-  bool m_qcnEnabled;
-  bool m_dynamicth;
-  uint32_t m_pausetime;	//< Time for each Pause
-  bool m_paused[qCnt];	//< Whether a queue paused
+   Ptr<QbbChannel> m_channel;
 
-  //qcn
+   //pfc
+   bool m_qbbEnabled;	//< PFC behaviour enabled
+   bool m_qcnEnabled;
+   bool m_dynamicth;
+   uint32_t m_pausetime;	//< Time for each Pause
+   bool m_paused[qCnt];	//< Whether a queue paused
+   EventId m_resumeEvt[qCnt];
 
-  /* RP parameters */
-  EventId  m_nextSend;		//< The next send event
-  /* State variable for rate-limited queues */
+   //qcn
 
-  //qcn
+   /* RP parameters */
+   EventId  m_nextSend;		//< The next send event
+   /* State variable for rate-limited queues */
 
-  struct ECNAccount{
-	  Ipv4Address source;
-	  uint32_t qIndex;
-	  uint32_t port;
-	  uint8_t ecnbits;
-	  uint16_t qfb;
-	  uint16_t total;
+   //qcn
+
+   struct ECNAccount{
+     Ipv4Address source;
+     uint32_t qIndex;
+     uint32_t port;
+     uint8_t ecnbits;
+     uint16_t qfb;
+     uint16_t total;
   };
 
   std::vector<ECNAccount> *m_ecn_source;

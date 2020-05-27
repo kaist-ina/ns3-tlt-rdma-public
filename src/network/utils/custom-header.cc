@@ -174,6 +174,8 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 		  i.WriteU16(ack.flags);
 		  i.WriteU16(ack.pg);
 		  i.WriteU32(ack.seq);
+		  i.WriteU32(ack.irnNack);
+		  i.WriteU16(ack.irnNackSize);
 		  udp.ih.Serialize(i);
 	  }else if (l3Prot == 0xFE){ // PFC
 		  i.WriteU32 (pfc.time);
@@ -310,6 +312,8 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  ack.flags = i.ReadU16();
 		  ack.pg = i.ReadU16();
 		  ack.seq = i.ReadU32();
+		  ack.irnNack = i.ReadU32();
+		  ack.irnNackSize = i.ReadU16();
 		  if (getInt)
 			  ack.ih.Deserialize(i);
 		  l4Size = GetAckSerializedSize();

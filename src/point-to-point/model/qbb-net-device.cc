@@ -46,13 +46,19 @@
 #include "ns3/seq-ts-header.h"
 #include "ns3/pointer.h"
 #include "ns3/custom-header.h"
+#include "ns3/flow-id-num-tag.h"
 
 #include <iostream>
+#include <unordered_map>
+
+#define MAP_KEY_EXISTS(map,key) (((map).find(key)!=(map).end())) 
 
 NS_LOG_COMPONENT_DEFINE("QbbNetDevice");
 
 namespace ns3 {
 	
+  	extern std::unordered_map<unsigned, Time> acc_pause_time;
+
 	uint32_t RdmaEgressQueue::ack_q_idx = 3;
 	// RdmaEgressQueue
 	TypeId RdmaEgressQueue::GetTypeId (void)
@@ -100,10 +106,47 @@ namespace ns3 {
 		// no pkt in highest priority queue, do rr for each qp
 		uint32_t fcount = m_qpGrp->GetN();
 		for (qIndex = 1; qIndex <= fcount; qIndex++){
+			if (m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount))
+				continue;
 			Ptr<RdmaQueuePair> qp = m_qpGrp->Get((qIndex + m_rrlast) % fcount);
-			if (!paused[qp->m_pg] && qp->GetBytesLeft() > 0 && !qp->IsWinBound()){
+			bool cond1 = !paused[qp->m_pg];
+			bool cond_window_allowed = qp->tlt.m_cc_type == CC_TYPE_RATE || (!qp->IsWinBound() && (!qp->irn.m_enabled || qp->CanIrnTransmit(m_mtu)));
+			bool cond_tlt = qp->tlt.m_enabled && qp->TltForceTxReady() && qp->tlt.m_sendState == TLT_STATE_IMPORTANT;
+			// bool cond2 = qp->GetBytesLeft() > 0 && (cond_window_allowed || (qp->tlt.m_enabled && qp->TltForceTxReady()));
+			bool cond2 = (qp->GetBytesLeft() > 0 && cond_window_allowed) || cond_tlt;
+			if (!cond2 && !m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) {
+				if (qp->IsFinishedConst()) {
+					m_qpGrp->SetQpFinished((qIndex + m_rrlast) % fcount);
+				}
+			}
+			if (!cond1 && cond2)
+			{
+				if (m_qpGrp->Get((qIndex + m_rrlast) % fcount)->m_nextAvail.GetTimeStep() > Simulator::Now().GetTimeStep()) {
+					//not available now	
+				} else {
+					// blocked by PFC
+					int32_t flowid = m_qpGrp->Get((qIndex + m_rrlast) % fcount)->m_flow_id;
+					if(!MAP_KEY_EXISTS(current_pause_time, flowid))
+						current_pause_time[flowid] = Simulator::Now();
+				}
+			}
+			else if (cond1 && cond2)
+			{
 				if (m_qpGrp->Get((qIndex + m_rrlast) % fcount)->m_nextAvail.GetTimeStep() > Simulator::Now().GetTimeStep()) //not available now
 					continue;
+				// Check if the flow has been blocked by PFC
+				{
+					int32_t flowid = m_qpGrp->Get((qIndex + m_rrlast) % fcount)->m_flow_id;
+					if (MAP_KEY_EXISTS(current_pause_time, flowid))
+					{
+						Time tdiff = Simulator::Now() - current_pause_time[flowid];
+						if(!MAP_KEY_EXISTS(acc_pause_time, flowid))
+							acc_pause_time[flowid] = Seconds(0);
+						acc_pause_time[flowid] = acc_pause_time[flowid] + tdiff;
+						current_pause_time.erase(flowid);
+					}
+				}
+
 				return (qIndex + m_rrlast) % fcount;
 			}
 		}
@@ -172,7 +215,7 @@ namespace ns3 {
 				MakeBooleanChecker())
 			.AddAttribute("PauseTime",
 				"Number of microseconds to pause upon congestion",
-				UintegerValue(5),
+				UintegerValue(671), //65535*(64Bytes/50Gbps)
 				MakeUintegerAccessor(&QbbNetDevice::m_pausetime),
 				MakeUintegerChecker<uint32_t>())
 			.AddAttribute ("TxBeQueue", 
@@ -265,13 +308,15 @@ namespace ns3 {
 			}else { // no packet to send
 				NS_LOG_INFO("PAUSE prohibits send at node " << m_node->GetId());
 				Time t = Simulator::GetMaximumSimulationTime();
-				for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++){
+				bool valid = false;
+				for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++) {
 					Ptr<RdmaQueuePair> qp = m_rdmaEQ->GetQp(i);
-					if (qp->GetBytesLeft() == 0)
+					if (qp->GetBytesLeft() == 0 || qp->m_nextAvail <= Simulator::Now())
 						continue;
 					t = Min(qp->m_nextAvail, t);
+					valid = true;
 				}
-				if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()){
+				if (valid && m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()) {
 					m_nextSend = Simulator::Schedule(t - Simulator::Now(), &QbbNetDevice::DequeueAndTransmit, this);
 				}
 			}
@@ -354,11 +399,15 @@ namespace ns3 {
 		if (ch.l3Prot == 0xFE){ // PFC
 			if (!m_qbbEnabled) return;
 			unsigned qIndex = ch.pfc.qIndex;
+			// std::cerr << "PFC!!" << std::endl;
 			if (ch.pfc.time > 0){
 				m_tracePfc(1);
 				m_paused[qIndex] = true;
+				Simulator::Cancel(m_resumeEvt[qIndex]);
+				m_resumeEvt[qIndex] = Simulator::Schedule(MicroSeconds(ch.pfc.time), &QbbNetDevice::Resume, this, qIndex);
 			}else{
 				m_tracePfc(0);
+				Simulator::Cancel(m_resumeEvt[qIndex]);
 				Resume(qIndex);
 			}
 		}else { // non-PFC packets (data, ACK, NACK, CNP...)
@@ -369,6 +418,8 @@ namespace ns3 {
 				// send to RdmaHw
 				int ret = m_rdmaReceiveCb(packet, ch);
 				// TODO we may based on the ret do something
+				if (ret == 0)
+					DoMpiReceive(packet);
 			}
 		}
 		return;
@@ -388,7 +439,9 @@ namespace ns3 {
 		return true;
 	}
 
-	void QbbNetDevice::SendPfc(uint32_t qIndex, uint32_t type){
+	uint32_t QbbNetDevice::SendPfc(uint32_t qIndex, uint32_t type){
+		if(!m_qbbEnabled)
+			return 0;
 		Ptr<Packet> p = Create<Packet>(0);
 		PauseHeader pauseh((type == 0 ? m_pausetime : 0), m_queue->GetNBytes(qIndex), qIndex);
 		p->AddHeader(pauseh);
@@ -404,6 +457,7 @@ namespace ns3 {
 		CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
 		p->PeekHeader(ch);
 		SwitchSend(0, p, ch);
+		return (type == 0 ? m_pausetime : 0);
 	}
 
 	bool

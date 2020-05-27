@@ -29,16 +29,23 @@
 #include "ns3/socket-factory.h"
 #include "ns3/packet.h"
 #include "ns3/uinteger.h"
+#include "ns3/boolean.h"
 #include "packet-loss-counter.h"
 
 #include "ns3/seq-ts-header.h"
 #include "udp-server.h"
+#include "ns3/flow-id-num-tag.h"
+#include "ns3/flow-stat-tag.h"
+#include <unordered_map>
+#include <climits>
 
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("UdpServer");
 NS_OBJECT_ENSURE_REGISTERED (UdpServer);
 
+
+static bool debug_first_terminate = true;
 
 TypeId
 UdpServer::GetTypeId (void)
@@ -51,21 +58,59 @@ UdpServer::GetTypeId (void)
                    UintegerValue (100),
                    MakeUintegerAccessor (&UdpServer::m_port),
                    MakeUintegerChecker<uint16_t> ())
-    .AddAttribute ("PacketWindowSize",
+    .AddAttribute ("PacketWindowSize", // deprecated
                    "The size of the window used to compute the packet loss. This value should be a multiple of 8.",
-                   UintegerValue (32),
+                   UintegerValue (256), // up to 256kbits
                    MakeUintegerAccessor (&UdpServer::GetPacketWindowSize,
                                          &UdpServer::SetPacketWindowSize),
                    MakeUintegerChecker<uint16_t> (8,256))
+    .AddTraceSource ("Rx", "A packet has been received",
+                     MakeTraceSourceAccessor (&UdpServer::m_rxTrace))
+    .AddTraceSource ("RxWithAddresses", "A packet has been received",
+                     MakeTraceSourceAccessor (&UdpServer::m_rxTraceWithAddresses))
+    .AddAttribute("FlowSize",
+		  "Expected length of incoming flow",
+		  UintegerValue(0),
+		  MakeUintegerAccessor(&UdpServer::expected_flow_size),
+		  MakeUintegerChecker<uint32_t>())               
+    .AddAttribute("MSS",
+		  "Maximum Segment Size",
+		  UintegerValue(1000),
+		  MakeUintegerAccessor(&UdpServer::m_mss),
+		  MakeUintegerChecker<uint32_t>())
+	  .AddAttribute("irn",
+		  "IRN enabled?",
+		  BooleanValue(false),
+		  MakeBooleanAccessor(&UdpServer::m_irn_server),
+		  MakeBooleanChecker())
+	  .AddAttribute("StatRxLen",
+		  "Total length of the flow (for statistical purpose only)",
+		  UintegerValue(0),
+		  MakeUintegerAccessor(&UdpServer::m_stat_flow_len),
+		  MakeUintegerChecker<uint32_t>())
+	  .AddAttribute("StatHostSrc",
+		  "Source Host ID (for statistical purpose only)",
+		  UintegerValue(0),
+		  MakeUintegerAccessor(&UdpServer::m_stat_host_src),
+		  MakeUintegerChecker<uint32_t>())
+	  .AddAttribute("StatHostDst",
+		  "Destination Host ID (for statistical purpose only)",
+		  UintegerValue(0),
+		  MakeUintegerAccessor(&UdpServer::m_stat_host_dst),
+		  MakeUintegerChecker<uint32_t>())
+	  .AddAttribute("StatFlowID",
+		  "Flow ID used for statistical purpose only. different from real Flow ID",
+		  UintegerValue(0),
+		  MakeUintegerAccessor(&UdpServer::m_stat_flow_id),
+		  MakeUintegerChecker<uint32_t>())
   ;
   return tid;
 }
 
 UdpServer::UdpServer ()
-  : m_lossCounter (0)
+  : flow_end_time(0)
 {
   NS_LOG_FUNCTION (this);
-  m_received=0;
 }
 
 UdpServer::~UdpServer ()
@@ -76,49 +121,76 @@ UdpServer::~UdpServer ()
 uint16_t
 UdpServer::GetPacketWindowSize () const
 {
-  return m_lossCounter.GetBitMapSize ();
+  return UINT16_MAX;
 }
 
 void
 UdpServer::SetPacketWindowSize (uint16_t size)
 {
-  m_lossCounter.SetBitMapSize (size);
+  // Do nothing. UdpServer can monitor any range of packet.
 }
 
 uint32_t
 UdpServer::GetLost (void) const
 {
-  return m_lossCounter.GetLost ();
+  return expected_flow_size - m_app_recv_buffer.receivedBytes();
 }
 
 uint32_t
 UdpServer::GetReceived (void) const
 {
-
-  return m_received;
-
+  return m_app_recv_buffer.receivedBytes();
 }
 
 void
 UdpServer::DoDispose (void)
 {
-  NS_LOG_FUNCTION (this);
+  extern std::unordered_map<unsigned, Time> acc_pause_time;
+  extern std::unordered_map<unsigned, unsigned> acc_timeout_count;
+  NS_LOG_FUNCTION(this);
+  bool is_completed = m_app_recv_buffer.isComplete(expected_flow_size);
+  if (!is_completed)
+    std::cerr << "[ERROR] Flow " << m_stat_flow_id << " Incomplete : Expected " << expected_flow_size << ", " << m_app_recv_buffer << std::endl;
+
+  if (debug_first_terminate)
+  {
+    fprintf(stdout, "Flow#\tsrc\tdst\tstart\tend\tduration\tsize\tcompleted\tactual#\tpaused\tdelayed%%\tT/O\n");
+    debug_first_terminate = false;
+  }
+  double time_paused = 0;
+  if (acc_pause_time.find(incoming_flow_id) != acc_pause_time.end())
+    time_paused = acc_pause_time.find(incoming_flow_id)->second.GetNanoSeconds() / 1000000000.;
+  unsigned timeout_count = 0;
+  if (acc_timeout_count.find(incoming_flow_id) != acc_timeout_count.end())
+    timeout_count = acc_timeout_count[incoming_flow_id];
+
+  fprintf(stdout, "%d\t%d\t%d\t%.9lf\t%.9lf\t%.9lf\t%u\t%s\t%u\t%.9lf\t%.3lf%%\t%u\n", m_stat_flow_id, m_stat_host_src, m_stat_host_dst, firstUsed.GetSeconds(), lastUsed.GetSeconds(),
+          lastUsed.GetSeconds() - firstUsed.GetSeconds(), m_stat_flow_len, (is_completed ? "COMPLETE" : "INCOMP"), incoming_flow_id, time_paused,
+          lastUsed.GetSeconds() != firstUsed.GetSeconds() ? (100 * time_paused / (lastUsed.GetSeconds() - firstUsed.GetSeconds())) : 0, timeout_count);
+  fflush(stdout);
   Application::DoDispose ();
 }
 
+bool 
+UdpServer::IsFlowComplete () const {
+  return m_app_recv_buffer.isComplete(expected_flow_size);
+}
 void
 UdpServer::StartApplication (void)
 {
   NS_LOG_FUNCTION (this);
 
   if (m_socket == 0)
+  {
+    TypeId tid = TypeId::LookupByName ("ns3::UdpSocketFactory");
+    m_socket = Socket::CreateSocket (GetNode (), tid);
+    InetSocketAddress local = InetSocketAddress (Ipv4Address::GetAny (),
+                                                  m_port);
+    if (m_socket->Bind (local) == -1)
     {
-      TypeId tid = TypeId::LookupByName ("ns3::UdpSocketFactory");
-      m_socket = Socket::CreateSocket (GetNode (), tid);
-      InetSocketAddress local = InetSocketAddress (Ipv4Address::GetAny (),
-                                                   m_port);
-      m_socket->Bind (local);
+      NS_FATAL_ERROR ("Failed to bind socket");
     }
+  }
 
   m_socket->SetRecvCallback (MakeCallback (&UdpServer::HandleRead, this));
 
@@ -128,7 +200,10 @@ UdpServer::StartApplication (void)
       m_socket6 = Socket::CreateSocket (GetNode (), tid);
       Inet6SocketAddress local = Inet6SocketAddress (Ipv6Address::GetAny (),
                                                    m_port);
-      m_socket6->Bind (local);
+      if (m_socket6->Bind (local) == -1)
+      {
+        NS_FATAL_ERROR ("Failed to bind socket");
+      }
     }
 
   m_socket6->SetRecvCallback (MakeCallback (&UdpServer::HandleRead, this));
@@ -152,13 +227,50 @@ UdpServer::HandleRead (Ptr<Socket> socket)
   NS_LOG_FUNCTION (this << socket);
   Ptr<Packet> packet;
   Address from;
+  Address localAddress;
   while ((packet = socket->RecvFrom (from)))
     {
+      socket->GetSockName (localAddress);
+      m_rxTrace (packet);
+      m_rxTraceWithAddresses (packet, from, localAddress);
       if (packet->GetSize () > 0)
         {
           SeqTsHeader seqTs;
           packet->RemoveHeader (seqTs);
           uint32_t currentSequenceNumber = seqTs.GetSeq ();
+          m_app_recv_buffer.recv(currentSequenceNumber, packet->GetSize());
+
+          FlowStatTag fst;
+          FlowIDNUMTag fit;
+          if (packet->PeekPacketTag(fst) && packet->PeekPacketTag(fit)) {
+            if (firstUsed.GetSeconds() == 0 && fst.GetType() == FlowStatTag::FLOW_START_AND_END) {
+              //Should print Flow start in client side for exec time of flow start
+              firstUsed = Seconds(fst.getInitiatedTime());
+              NS_LOG_INFO("FLOW END Time: " << Simulator::Now() << " FLOWID " << fit.GetId() );
+
+              flow_end_time = Simulator::Now();
+              lastUsed = Simulator::Now();
+            }
+            else if (firstUsed.GetSeconds() == 0 && fst.GetType() == FlowStatTag::FLOW_START) {
+              //Should print Flow start in client side for exec time of flow start
+              firstUsed = Seconds(fst.getInitiatedTime());
+            }
+            else if (firstUsed.GetSeconds() != 0 && flow_end_time ==0 && fst.GetType() == FlowStatTag::FLOW_END && m_app_recv_buffer.isComplete(expected_flow_size)) {
+              NS_LOG_INFO("FLOW END Time: " << Simulator::Now() << " FLOWID " << fit.GetId() );
+              flow_end_time = Simulator::Now();
+              lastUsed = Simulator::Now();
+            }
+            else if (firstUsed.GetSeconds() != 0 && flow_end_time == 0 && m_app_recv_buffer.isComplete(expected_flow_size) && m_irn_server) {
+              NS_LOG_INFO("FLOW END Time: " << Simulator::Now() << " FLOWID " << fit.GetId());
+              flow_end_time = Simulator::Now();
+              lastUsed = Simulator::Now();
+            }
+            else if (flow_end_time ==0 && fst.GetType() == FlowStatTag::FLOW_END) {
+              // std::cout << "We have " << Packet_checker.GetLost() << " lost... fid=" << fit.GetId() << std::endl;
+            }
+            NS_LOG_INFO(" FLOW COMMING " << fit.GetId() << " Seqnum: " << currentSequenceNumber);
+            incoming_flow_id =  fit.GetId() ;
+          }
           if (InetSocketAddress::IsMatchingType (from))
             {
               NS_LOG_INFO ("TraceDelay: RX " << packet->GetSize () <<
@@ -179,22 +291,7 @@ UdpServer::HandleRead (Ptr<Socket> socket)
                            " RXtime: " << Simulator::Now () <<
                            " Delay: " << Simulator::Now () - seqTs.GetTs ());
             }
-
-          m_lossCounter.NotifyReceived (currentSequenceNumber);
-          m_received++;
         }
-	  /*
-	  if (m_received>4000)
-	  {
-		  m_received = 0;
-		  Ptr<Packet> p = Create<Packet> (64);
-		  std::stringstream peerAddressStringStream;
-		  if (Ipv4Address::IsMatchingType (m_peerAddress))
-		  {
-			  peerAddressStringStream << Ipv4Address::ConvertFrom (m_peerAddress);
-		  }
-	  } 
-	  */
     }
 }
 

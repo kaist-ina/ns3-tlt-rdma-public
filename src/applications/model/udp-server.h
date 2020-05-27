@@ -27,7 +27,10 @@
 #include "ns3/event-id.h"
 #include "ns3/ptr.h"
 #include "ns3/address.h"
+#include "ns3/traced-callback.h"
 #include "packet-loss-counter.h"
+#include "check-all-packets.h"
+#include "app-recv-buffer.h"
 namespace ns3 {
 /**
  * \ingroup applications
@@ -72,6 +75,7 @@ public:
    *  be a multiple of 8
    */
   void SetPacketWindowSize (uint16_t size);
+  bool IsFlowComplete () const;
 
   void SetRemote (Ipv4Address ip, uint16_t port);
 
@@ -89,11 +93,31 @@ private:
   Ptr<Socket> m_socket;
   Ptr<Socket> m_socket6;
   Address m_local;
-  uint32_t m_received;
-  PacketLossCounter m_lossCounter;
   
+  uint32_t m_mss;
+  uint16_t incoming_flow_id;
+  AppRecvBuffer m_app_recv_buffer;
+
+  bool m_irn_server;
+  Time flow_end_time;
+
+  uint32_t m_stat_flow_len; //!< Size of the flow in bytes. only used for statistical purpose
+  uint32_t m_stat_host_src; //!< Source host of the flow. only used for statistical purpose
+  uint32_t m_stat_host_dst; //!< Destination host of the flow. only used for statistical purpose
+  uint32_t m_stat_flow_id;  //!< Destination host of the flow. only used for statistical purpose
+
+  uint32_t expected_flow_size;
   Address m_peerAddress;
   uint16_t m_peerPort;
+
+  Time firstUsed {Seconds(0)};
+  Time lastUsed {Seconds(0)};
+  
+  /// Callbacks for tracing the packet Rx events
+  TracedCallback<Ptr<const Packet> > m_rxTrace;
+
+  /// Callbacks for tracing the packet Rx events, includes source and destination addresses
+  TracedCallback<Ptr<const Packet>, const Address &, const Address &> m_rxTraceWithAddresses;
 
 };
 

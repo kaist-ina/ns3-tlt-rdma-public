@@ -9,8 +9,55 @@
 #include <ns3/custom-header.h>
 #include <ns3/int-header.h>
 #include <vector>
+#include <ns3/selective-packet-queue.h>
+
+#include <climits>		/* for CHAR_BIT */
+
+#define BITMASK(b) (1 << ((b) % CHAR_BIT))
+#define BITSLOT(b) ((b) / CHAR_BIT)
+#define BITSET(a, b) ((a)[BITSLOT(b)] |= BITMASK(b))
+#define BITCLEAR(a, b) ((a)[BITSLOT(b)] &= ~BITMASK(b))
+#define BITTEST(a, b) ((a)[BITSLOT(b)] & BITMASK(b))
+#define BITNSLOTS(nb) ((nb + CHAR_BIT - 1) / CHAR_BIT)
+
+#define ESTIMATED_MAX_FLOW_PER_HOST 9120
 
 namespace ns3 {
+
+enum CcMode {
+	CC_MODE_DCQCN = 1,
+	CC_MODE_HPCC = 3,
+	CC_MODE_TIMELY = 7,
+	CC_MODE_DCTCP = 8,
+	CC_MODE_UNDEFINED = 0,
+};
+enum TltCcType
+{
+	CC_TYPE_RATE,
+	CC_TYPE_DYNAMIC_WINDOW,
+	CC_TYPE_STATIC_WINDOW
+};
+
+class IrnSackManager {
+private:
+    std::list<std::pair<uint32_t, uint32_t>> m_data;
+
+public:
+	int socketId {-1};
+
+	IrnSackManager();
+	IrnSackManager(int flow_id);
+	void sack(uint32_t seq, uint32_t size); // put blocks
+	size_t discardUpTo(uint32_t seq); // return number of blocks removed
+	bool IsEmpty();
+	bool blockExists(uint32_t seq, uint32_t size); // query if block exists inside SACK table
+	bool peekFrontBlock(uint32_t *pseq, uint32_t *psize);
+	
+	friend std::ostream &operator<<(std::ostream &os, const IrnSackManager &im);
+};
+
+
+enum TltState { TLT_STATE_IDLE = 0, TLT_STATE_IMPORTANT, TLT_STATE_IMPORTANT_FORCE, TLT_STATE_SCHEDULED };
 
 class RdmaQueuePair : public Object {
 public:
@@ -28,6 +75,8 @@ public:
 	Time m_nextAvail;	//< Soonest time of next send
 	uint32_t wp; // current window of packets
 	uint32_t lastPktSize;
+	int32_t m_flow_id;
+	Time m_timeout;
 
 	/******************************
 	 * runtime states
@@ -74,6 +123,51 @@ public:
 		uint32_t m_batchSizeOfAlpha;
 	} dctcp;
 
+	struct {
+		bool m_enabled;
+		uint32_t m_bdp; // m_irn_maxAck_
+		uint32_t m_highest_ack; // m_irn_maxAck_
+		uint32_t m_max_seq; // m_irn_maxSeq_
+		Time m_rtoLow;
+		Time m_rtoHigh;
+		IrnSackManager m_sack;
+		bool m_recovery;
+		uint32_t m_recovery_seq;
+	} irn;
+
+		struct {
+		bool m_enabled;
+		
+		// Window-based CC
+		TltState m_sendState;
+		TltCcType m_cc_type;
+		uint32_t m_sendUnit;
+		uint32_t m_highestImportantAck;
+		std::list<std::pair<uint32_t, uint32_t>> m_forcetx_queue;
+		uint64_t stat_uimp_forcegen;
+		uint32_t stat_uimp_forcegen_cnt;
+		
+		Ptr<SelectivePacketQueue> m_tlt_unimportant_pkts_current_round;
+		SelectivePacketQueue m_tlt_unimportant_pkts;
+		Ptr<SelectivePacketQueue> m_tlt_unimportant_pkts_prev_round;
+		bool m_sent_fin;
+
+		// Rate-based CC
+		uint64_t m_sent_pkt_count;
+		bool m_first_retx;
+		uint64_t m_last_marked_sent_pkt_count;
+	} tlt;
+
+	struct {
+		uint64_t txTotalPkts {0};
+		uint64_t txTotalBytes {0};
+	} stat;
+
+	// Implement Timeout according to IB Spec Vol. 1 C9-139.
+	// For an HCA requester using Reliable Connection service, to detect missing responses,
+	// every Send queue is required to implement a Transport Timer to time outstanding requests.
+	EventId m_retransmit;
+
 	/***********
 	 * methods
 	 **********/
@@ -83,6 +177,8 @@ public:
 	void SetWin(uint32_t win);
 	void SetBaseRtt(uint64_t baseRtt);
 	void SetVarWin(bool v);
+	void SetFlowId(int32_t v);
+	void SetTimeout(Time v);
 
 	uint64_t GetBytesLeft();
 	uint32_t GetHash(void);
@@ -91,7 +187,35 @@ public:
 	bool IsWinBound();
 	uint64_t GetWin(); // window size calculated from m_rate
 	bool IsFinished();
-	uint64_t HpGetCurWin(); // window size calculated from hp.m_curRate, used by HPCC
+	inline bool IsFinishedConst() const {
+		return snd_una >= m_size;
+	}
+
+	uint64_t HpGetCurWin();  // window size calculated from hp.m_curRate, used by HPCC
+
+	inline uint32_t GetIrnBytesInFlight() const {
+		// IRN do not consider SACKed segments for simplicity
+		return irn.m_max_seq - irn.m_highest_ack;
+	}
+
+	Time GetRto(uint32_t mtu) {
+		if (irn.m_enabled) {
+			if (GetIrnBytesInFlight() > 3*mtu) {
+				return irn.m_rtoHigh;
+			}
+			return irn.m_rtoLow;
+		} else {
+			return m_timeout;
+		}
+	}
+
+	inline bool CanIrnTransmit(uint32_t mtu) const {
+		uint64_t len_left = m_size >= snd_nxt ? m_size - snd_nxt : 0;
+
+		return !irn.m_enabled || (GetIrnBytesInFlight() + ((len_left > mtu) ? mtu : len_left)) < irn.m_bdp || (irn.m_highest_ack + irn.m_bdp > snd_nxt);
+	}
+
+	bool TltForceTxReady();
 };
 
 class RdmaRxQueuePair : public Object { // Rx side queue pair
@@ -113,6 +237,9 @@ public:
 	int32_t m_milestone_rx;
 	uint32_t m_lastNACK;
 	EventId QcnTimerEvent; // if destroy this rxQp, remember to cancel this timer
+	IrnSackManager m_irn_sack_;
+	TltState m_tlt_recvState;
+	int32_t m_flow_id;
 
 	static TypeId GetTypeId (void);
 	RdmaRxQueuePair();
@@ -123,6 +250,7 @@ class RdmaQueuePairGroup : public Object {
 public:
 	std::vector<Ptr<RdmaQueuePair> > m_qps;
 	//std::vector<Ptr<RdmaRxQueuePair> > m_rxQps;
+	char m_qp_finished[BITNSLOTS(ESTIMATED_MAX_FLOW_PER_HOST)];
 
 	static TypeId GetTypeId (void);
 	RdmaQueuePairGroup(void);
@@ -132,6 +260,17 @@ public:
 	void AddQp(Ptr<RdmaQueuePair> qp);
 	//void AddRxQp(Ptr<RdmaRxQueuePair> rxQp);
 	void Clear(void);
+	inline bool IsQpFinished(uint32_t idx) {
+		if (__glibc_unlikely(idx >= ESTIMATED_MAX_FLOW_PER_HOST))
+			return false;
+		return BITTEST(m_qp_finished, idx);
+	}
+
+	inline void SetQpFinished(uint32_t idx) {
+		if (__glibc_unlikely(idx >= ESTIMATED_MAX_FLOW_PER_HOST))
+			return;
+		BITSET(m_qp_finished, idx);
+	}
 };
 
 }

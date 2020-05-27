@@ -124,6 +124,8 @@ public:
 		  uint16_t pg;
 		  uint32_t seq; // the qbb sequence number.
 		  IntHeader ih;
+		  uint32_t irnNack;
+		  uint16_t irnNackSize;
 	  } ack;
 	  // PauseHeader
 	  struct {

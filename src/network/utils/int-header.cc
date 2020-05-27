@@ -2,7 +2,7 @@
 
 namespace ns3 {
 
-const uint64_t IntHop::lineRateValues[8] = {25000000000lu,50000000000lu,100000000000lu,200000000000lu,400000000000lu,0,0,0};
+const uint64_t IntHop::lineRateValues[8] = {25000000000lu, 50000000000lu, 100000000000lu, 200000000000lu, 400000000000lu, 40000000000lu, 0, 0};
 uint32_t IntHop::multi = 1;
 
 uint32_t IntHeader::mode = 0;

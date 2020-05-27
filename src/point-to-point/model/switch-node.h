@@ -7,12 +7,35 @@
 #include "switch-mmu.h"
 
 namespace ns3 {
+struct stat_tx_ {
+	uint64_t txUimpBytes = 0;
+	uint64_t txImpBytes = 0;
+	uint64_t txImpEBytes = 0;
+	uint64_t txUimpBytesNIC = 0;
+	uint64_t txImpBytesNIC = 0;
+	uint64_t txImpBytesNIC_PL = 0;
+	uint64_t txImpBytesNIC_PLR = 0;
+	uint64_t txImpBytesNIC_PLE = 0;
+	uint64_t txImpBytesNIC_CNP = 0;
+	uint64_t txImpBytesNIC_ACK = 0;
+	uint64_t txImpBytesNIC_NACK = 0;
+	uint64_t txImpEBytesNIC = 0;
+	uint64_t txImpFBytesNIC = 0;
+	uint64_t txImpEFBytesNIC = 0;
+	uint64_t txImpCBytesNIC = 0;
+	uint64_t txTltDropBytes = 0;
+	uint64_t importantDropBytes = 0;
+	uint64_t importantDropCnt = 0;
+	uint64_t RetxTimeoutCnt = 0;
+	uint64_t PauseSendCnt = 0;
+	bool stat_print = false;
+};
 
 class Packet;
 
 class SwitchNode : public Node{
-	static const uint32_t pCnt = 257;	// Number of ports used
-	static const uint32_t qCnt = 8;	// Number of queues/priorities used
+	static const unsigned qCnt = 8;	// Number of queues/priorities used
+	static const unsigned pCnt = 128; // port 0 is not used so + 1	// Number of ports used
 	uint32_t m_ecmpSeed;
 	std::unordered_map<uint32_t, std::vector<int> > m_rtTable; // map from ip address (u32) to possible ECMP port (index of dev)
 
