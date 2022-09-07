@@ -1,6 +1,8 @@
 # NS-3 simulator for TLT (RDMA)
 This is an official Github repository for the Eurosys '21 paper "[Towards timeout-less transport in commodity datacenter networks.](https://dl.acm.org/doi/10.1145/3447786.3456227)".
-* For the VMA testbed implementation, please visit [https://github.com/kaist-ina/libvma-tlt-public](https://github.com/kaist-ina/libvma-tlt-public).
+
+* For the TCP version, please visit [https://github.com/kaist-ina/ns3-tlt-tcp-public](https://github.com/kaist-ina/ns3-tlt-tcp-public).
+* For the VMA testbed implementation (TCP only), please visit [https://github.com/kaist-ina/libvma-tlt-public](https://github.com/kaist-ina/libvma-tlt-public).
 
 If you find this repository useful in your research, please consider citing:
 ```
@@ -15,3 +17,6 @@ url = {https://doi.org/10.1145/3447786.3456227},
 doi = {10.1145/3447786.3456227}
 }
 ```
+
+## Credit
+This code repository is based on [https://github.com/alibaba-edu/High-Precision-Congestion-Control](https://github.com/alibaba-edu/High-Precision-Congestion-Control).
